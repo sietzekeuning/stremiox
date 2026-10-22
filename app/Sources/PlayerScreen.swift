@@ -115,6 +115,9 @@ struct PlayerScreen: View {
     @State private var macSleepActivity: NSObjectProtocol?
     /// Local keyDown monitor that turns Esc / ⌘. into "close the player" (see handleMacKeyDown).
     @State private var macKeyMonitor: Any?
+    /// Whether the app window is in full screen, for the top-bar button's icon. Follows the window
+    /// notifications, so the green button and the View menu keep it right too.
+    @State private var macFullScreen = false
     #endif
     @State private var panel: Panel?
     @State private var panelRows: [Row] = []   // cached so a 4×/s clock tick doesn't re-rank a thousand sources
@@ -243,7 +246,7 @@ struct PlayerScreen: View {
                 .hidden()
             // ⌘F toggles the app window's full screen (the player already fills the window). Scoped to
             // the player so ⌘F stays free for search elsewhere in the app.
-            Button { NSApp.keyWindow?.toggleFullScreen(nil) } label: { EmptyView() }
+            Button { toggleMacFullScreen() } label: { EmptyView() }
                 .keyboardShortcut("f", modifiers: .command)
                 .hidden()
             #endif
@@ -268,6 +271,7 @@ struct PlayerScreen: View {
                     MainActor.assumeIsolated { handleMacKeyDown(event) } ? nil : event
                 }
             }
+            macFullScreen = NSApp.keyWindow?.styleMask.contains(.fullScreen) ?? false
             #endif
         }
         .onDisappear {
@@ -304,6 +308,14 @@ struct PlayerScreen: View {
             Text(externalChooserMessage)
         }
         .sheet(isPresented: $showShare) { ShareSheet(items: [curURL ?? url]) }
+        #if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            macFullScreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            macFullScreen = false
+        }
+        #endif
     }
 
     // MARK: - Property handling
@@ -835,6 +847,12 @@ struct PlayerScreen: View {
                 coordinator.player?.setOrientation(landscape: forcedLandscape)
                 scheduleHide()
             }
+            #elseif os(macOS)
+            iconButton(macFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                       label: macFullScreen ? "Exit full screen" : "Enter full screen") {
+                toggleMacFullScreen()
+                scheduleHide()
+            }
             #endif
             if !isLive {
                 // Restart from 0:00 (tvOS parity #5): seek to the start and keep playing.
@@ -1323,19 +1341,29 @@ struct PlayerScreen: View {
     }
 
     #if os(macOS)
-    /// Esc / ⌘. close the player at any point (#14), returning true when the key was handled. An
-    /// AppKit monitor rather than a hidden `.cancelAction` button: once the window has been in and
-    /// out of full screen that shortcut stops firing (the Esc keyDown still reaches the window, with
-    /// the window as first responder, but no action runs), so Esc went dead right after ⌘F. A sheet
-    /// on the window ("Play in another app", the share sheet) keeps Esc for itself.
+    /// Esc / ⌘. step back, returning true when the key was handled: in full screen they bring the
+    /// window back to the windowed player, otherwise they close the player (#14). An AppKit monitor
+    /// rather than a hidden `.cancelAction` button: once the window has been in and out of full
+    /// screen that shortcut stops firing (the Esc keyDown still reaches the window, with the window
+    /// as first responder, but no action runs). A sheet on the window ("Play in another app", the
+    /// share sheet) keeps Esc for itself.
     private func handleMacKeyDown(_ event: NSEvent) -> Bool {
         guard let window = event.window, !window.isSheet, window.attachedSheet == nil else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let escape = event.keyCode == 53 && modifiers.isEmpty   // 53 = kVK_Escape
         let commandPeriod = event.charactersIgnoringModifiers == "." && modifiers == .command
         guard escape || commandPeriod else { return false }
-        leavePlayback()
+        if window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+        } else {
+            leavePlayback()
+        }
         return true
+    }
+
+    /// Full screen for the app window (the player already fills it): the top-bar button and ⌘F.
+    private func toggleMacFullScreen() {
+        NSApp.keyWindow?.toggleFullScreen(nil)
     }
     #endif
 
