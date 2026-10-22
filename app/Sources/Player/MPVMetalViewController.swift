@@ -126,15 +126,37 @@ final class MPVMetalViewController: PlatformViewController {
         // libmpv sets the video output up for whatever size it STARTS at but doesn't refill the
         // surface after a live resize (the video ends up tiny in a corner after rotating). Rebuild
         // the video output (vid no → auto) at the new size.
-        if didResize { reconfigureVideoOutput() }
+        if didResize { scheduleVideoReconfigure() }
+    }
+
+    /// The rebuild waiting for a resize to settle. A live window resize or a macOS full-screen
+    /// transition lays the view out dozens of times; rebuilding on every pass restarted the video
+    /// chain (decoder re-init plus a refresh seek on the stream) each time. Rebuild once instead.
+    private var pendingVideoReconfigure: DispatchWorkItem?
+
+    private func scheduleVideoReconfigure() {
+        pendingVideoReconfigure?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingVideoReconfigure = nil
+            self?.reconfigureVideoOutput()
+        }
+        pendingVideoReconfigure = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     private func reconfigureVideoOutput() {
         guard mpv != nil else { return }
+        // force-window keeps the video output alive across `vid=no`: mpv then reconfigures it in
+        // place, which is the one path where MPVKit's moltenvk context re-reads the layer's
+        // drawableSize. Without it `vid=no` destroyed the output, and freeing the Vulkan device
+        // while Metal command buffers were still completing crashed the app entering full screen
+        // (SIGSEGV in MVKCommandEncoder::finishQueries on com.Metal.CompletionQueueDispatch).
+        checkError(mpv_set_option_string(mpv, "force-window", "yes"))
         checkError(mpv_set_option_string(mpv, "vid", "no"))
         DispatchQueue.main.async { [weak self] in
             guard let self, self.mpv != nil else { return }
             self.checkError(mpv_set_option_string(self.mpv, "vid", "auto"))
+            self.checkError(mpv_set_option_string(self.mpv, "force-window", "no"))
             self.applyVideoSize { self.setString($0, $1) }   // re-apply size after the rebuild
         }
     }
@@ -457,6 +479,8 @@ final class MPVMetalViewController: PlatformViewController {
         HDRDisplayMode.reset(in: viewIfLoaded?.window)
 #endif
         appliedDynamicRange = .sdr
+        pendingVideoReconfigure?.cancel()
+        pendingVideoReconfigure = nil
         guard let handle = mpv else { return }
         // Nil the handle SYNCHRONOUSLY so exactly one owner destroys it: deinit's safety net
         // sees nil (no double terminate when dealloc beats the queued block), the event drain
@@ -659,6 +683,7 @@ final class MPVMetalViewController: PlatformViewController {
     }
     
     private func getFlag(_ name: String) -> Bool {
+        guard mpv != nil else { return false }
         var data = Int64()
         mpv_get_property(mpv, name, MPV_FORMAT_FLAG, &data)
         return data > 0

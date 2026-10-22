@@ -113,6 +113,8 @@ struct PlayerScreen: View {
     /// Display-sleep assertion held while the player is open (macOS parity with the iOS idle-timer
     /// disable): keeps the Mac from dimming / sleeping mid-movie. Ended on disappear.
     @State private var macSleepActivity: NSObjectProtocol?
+    /// Local keyDown monitor that turns Esc / ⌘. into "close the player" (see handleMacKeyDown).
+    @State private var macKeyMonitor: Any?
     #endif
     @State private var panel: Panel?
     @State private var panelRows: [Row] = []   // cached so a 4×/s clock tick doesn't re-rank a thousand sources
@@ -222,7 +224,7 @@ struct PlayerScreen: View {
                                 .padding(12).background(.black.opacity(0.55), in: Circle())
                         }
                         .buttonStyle(.plain)
-                        .keyboardShortcut(.cancelAction)   // ⌘. / Esc on macOS
+                        .keyboardShortcut(.cancelAction)   // ⌘. / Esc on iPad; the Mac uses handleMacKeyDown
                         .accessibilityLabel("Close player")
                         Spacer()
                     }
@@ -234,11 +236,15 @@ struct PlayerScreen: View {
             }
 
             #if os(macOS)
-            // The visible pre-start close button vanishes once playback starts, taking its
-            // .cancelAction shortcut with it. macOS has no remote/Esc fallback otherwise, so keep an
-            // always-present hidden Esc handler so ⌘. / Esc closes the player at any point (#14).
-            Button { leavePlayback() } label: { EmptyView() }
-                .keyboardShortcut(.cancelAction)
+            // Space toggles play/pause, like every Mac video player. A hidden button because the
+            // visible one fades out and stops taking input when the controls auto-hide.
+            Button { togglePlayback() } label: { EmptyView() }
+                .keyboardShortcut(.space, modifiers: [])
+                .hidden()
+            // ⌘F toggles the app window's full screen (the player already fills the window). Scoped to
+            // the player so ⌘F stays free for search elsewhere in the app.
+            Button { NSApp.keyWindow?.toggleFullScreen(nil) } label: { EmptyView() }
+                .keyboardShortcut("f", modifiers: .command)
                 .hidden()
             #endif
         }
@@ -257,6 +263,11 @@ struct PlayerScreen: View {
             // mid-movie (the iOS/tvOS keep-awake parity that was missing on Mac).
             macSleepActivity = ProcessInfo.processInfo.beginActivity(options: .idleDisplaySleepDisabled,
                                                                      reason: "StremioX video playback")
+            if macKeyMonitor == nil {
+                macKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    MainActor.assumeIsolated { handleMacKeyDown(event) } ? nil : event
+                }
+            }
             #endif
         }
         .onDisappear {
@@ -267,6 +278,7 @@ struct PlayerScreen: View {
             UIApplication.shared.isIdleTimerDisabled = false  // let the screensaver / auto-lock resume once the player closes
             #elseif os(macOS)
             if let token = macSleepActivity { ProcessInfo.processInfo.endActivity(token); macSleepActivity = nil }
+            if let monitor = macKeyMonitor { NSEvent.removeMonitor(monitor); macKeyMonitor = nil }
             #endif
         }
         .confirmationDialog("Play in another app", isPresented: $showExternalChooser,
@@ -849,7 +861,7 @@ struct PlayerScreen: View {
             if !isLive {
                 seekButton("gobackward.10", by: -10)
             }
-            Button { coordinator.player?.togglePause(); scheduleHide() } label: {
+            Button { togglePlayback() } label: {
                 Image(systemName: isPaused ? "play.fill" : "pause.fill")
                     .font(.system(size: 50)).foregroundStyle(.white).shadow(radius: 8)
                     .frame(width: 100, height: 100)
@@ -859,6 +871,14 @@ struct PlayerScreen: View {
                 seekButton("goforward.10", by: 10)
             }
         }
+    }
+
+    /// Play/pause from the center button or the space bar. Brings the controls up so the new state
+    /// shows; they stay up while paused. Nothing to toggle behind the load-error overlay.
+    private func togglePlayback() {
+        guard !loadFailed else { return }
+        coordinator.player?.togglePause()
+        scheduleHide()
     }
 
     private func seekButton(_ icon: String, by delta: Double) -> some View {
@@ -1301,6 +1321,23 @@ struct PlayerScreen: View {
         if !isLive, duration > 0 { onProgress(currentTime, duration) }
         onClose()
     }
+
+    #if os(macOS)
+    /// Esc / ⌘. close the player at any point (#14), returning true when the key was handled. An
+    /// AppKit monitor rather than a hidden `.cancelAction` button: once the window has been in and
+    /// out of full screen that shortcut stops firing (the Esc keyDown still reaches the window, with
+    /// the window as first responder, but no action runs), so Esc went dead right after ⌘F. A sheet
+    /// on the window ("Play in another app", the share sheet) keeps Esc for itself.
+    private func handleMacKeyDown(_ event: NSEvent) -> Bool {
+        guard let window = event.window, !window.isSheet, window.attachedSheet == nil else { return false }
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let escape = event.keyCode == 53 && modifiers.isEmpty   // 53 = kVK_Escape
+        let commandPeriod = event.charactersIgnoringModifiers == "." && modifiers == .command
+        guard escape || commandPeriod else { return false }
+        leavePlayback()
+        return true
+    }
+    #endif
 
     private func refreshTracks() {
         audioTracks = coordinator.player?.tracks(ofType: "audio") ?? []
