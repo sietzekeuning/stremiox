@@ -334,6 +334,15 @@ enum StreamRanking {
     /// (e.g. "👤 47" or "Seeders: 47"). The emoji form wins over the worded form, and the
     /// worded form requires its colon, so a title like "The Bad Seed 2018" can't supply a
     /// phantom count. nil when absent.
+    /// Seeders worth showing on a source row: only where swarm health decides how fast playback
+    /// starts, a raw torrent or an uncached debrid result. A cached / direct stream plays at once
+    /// whatever the swarm, so it gets nil.
+    static func displaySeeders(_ s: CoreStream) -> Int? {
+        let text = qualityText(s)
+        guard s.isTorrent || !isCached(s, text) else { return nil }
+        return seederCount(text)
+    }
+
     static func seederCount(_ text: String) -> Int? {
         let patterns = [#"👤[:\s]*([0-9]+)"#, #"(?<![a-z0-9])seed(er)?s?\s*:\s*([0-9]+)"#]
         for pattern in patterns {

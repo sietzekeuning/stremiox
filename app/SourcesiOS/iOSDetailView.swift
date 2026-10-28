@@ -1401,6 +1401,14 @@ private struct iOSStreamLabel: View {
                             .foregroundStyle(Theme.Palette.textTertiary)
                             .lineLimit(1)
                     }
+                    // Seeders only where they decide the start time (raw torrent / uncached debrid).
+                    if let seeders = StreamRanking.displaySeeders(stream) {
+                        Label("\(seeders)", systemImage: "person.fill")
+                            .font(Theme.Typography.label)
+                            .foregroundStyle(seeders == 0 ? Theme.Palette.textTertiary : Theme.Palette.textSecondary)
+                            .lineLimit(1)
+                            .accessibilityLabel("\(seeders) seeder\(seeders == 1 ? "" : "s")")
+                    }
                 }
                 // One trimmed human-readable line for context (the release title), collapsed to a
                 // single line so a verbose multi-line add-on blurb can't bloat the row.
