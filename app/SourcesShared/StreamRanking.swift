@@ -91,8 +91,14 @@ enum StreamRanking {
         }
         let hasHint = hint?.isEmpty == false
         let hasBinge = binge?.isEmpty == false
-        guard hasHint || hasBinge else { return best(groups) }
-        let candidates = groups.flatMap { $0.streams }.filter { $0.playableURL != nil }
+        guard hasHint || hasBinge, let plain = best(groups) else { return best(groups) }
+        // The bonuses pick a release family among sources at least as sharp as the plain best,
+        // never a lower resolution: a 1080p only out-scores a 720p by ~360, so the +800 / +2500
+        // otherwise kept a whole season on 720p once its first episode played at 720p, even with
+        // a cached 1080p (or 4K) available.
+        let floor = resolution(qualityText(plain))
+        let candidates = groups.flatMap { $0.streams }
+            .filter { $0.playableURL != nil && resolution(qualityText($0)) >= floor }
         return candidates.max { lhs, rhs in
             (score(lhs) + continuityBonus(lhs, hint: hint) + bingeBonus(lhs, group: binge)) <
             (score(rhs) + continuityBonus(rhs, hint: hint) + bingeBonus(rhs, group: binge))
