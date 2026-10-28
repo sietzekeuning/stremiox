@@ -117,6 +117,7 @@ struct PlayerScreen: View {
     /// disable): keeps the Mac from dimming / sleeping mid-movie. Ended on disappear.
     @State private var macSleepActivity: NSObjectProtocol?
     @State private var macFullScreen = NSApp.keyWindow?.styleMask.contains(.fullScreen) ?? false
+    @State private var lastHoverWake = Date.distantPast   // throttles the mouse-move wake of the controls
     #endif
     @State private var panel: Panel?
     @State private var panelRows: [Row] = []   // cached so a 4×/s clock tick doesn't re-rank a thousand sources
@@ -272,6 +273,16 @@ struct PlayerScreen: View {
         #endif
         .tint(Theme.Palette.accent)
         .animation(.easeInOut(duration: 0.25), value: showUpNext)
+        #if os(macOS)
+        // Moving the mouse brings the controls up (and keeps them up while it moves), as in other Mac
+        // players, instead of needing a click. A move fires many times a second, so re-arm the hide
+        // timer at most twice a second.
+        .onContinuousHover { phase in
+            guard case .active = phase, panel == nil, Date().timeIntervalSince(lastHoverWake) > 0.5 else { return }
+            lastHoverWake = Date()
+            withAnimation(.easeInOut(duration: 0.2)) { scheduleHide() }
+        }
+        #endif
         .onAppear {
             curURL = url; curHeaders = headers; curIsTorrent = recordIsTorrent
             scheduleHide(); startLoadTimeout()
@@ -1475,6 +1486,9 @@ struct PlayerScreen: View {
             // while scrubbing, a panel is open, or paused.
             guard !Task.isCancelled, hasStartedPlaying, !scrubbing, panel == nil, !isPaused else { return }
             withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = false }
+            #if os(macOS)
+            NSCursor.setHiddenUntilMouseMoves(true)   // the pointer goes with the controls; a move brings both back
+            #endif
         }
     }
 
