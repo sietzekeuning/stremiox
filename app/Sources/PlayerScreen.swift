@@ -15,6 +15,8 @@ struct PlayerScreen: View {
     var headers: [String: String]? = nil                    // behaviorHints.proxyHeaders for header-gated CDNs
     var resumeSeconds: Double = 0                            // saved position to resume from
     var hasNext: Bool = false                               // show the Next Episode button
+    var nextLabel: String? = nil                            // "S1 · E5 · Title" for the Up Next card
+    var nextThumbnail: URL? = nil                           // the next episode's still, shown on the card
     // Continue-Watching / quality-continuity parity with tvOS: when set, the working link is recorded
     // into LastStreamStore once playback actually starts, so a later CW tap can resume this exact
     // stream and reopening the title auto-picks the same quality. nil for ad-hoc plays (paste-a-link),
@@ -92,6 +94,7 @@ struct PlayerScreen: View {
     @State private var appliedSize = false
     @State private var appliedInitialResume = false   // the launch-offset seek runs once; switches use nudgeResume
     @State private var markedWatched = false           // ~90%/EOF watched marker fires once per title (mirrors tvOS)
+    @State private var upNextDismissed = false         // the user closed the Up Next card for this episode
     @State private var buffering = true
     @State private var currentTime = 0.0
     @State private var duration = 0.0
@@ -113,6 +116,7 @@ struct PlayerScreen: View {
     /// Display-sleep assertion held while the player is open (macOS parity with the iOS idle-timer
     /// disable): keeps the Mac from dimming / sleeping mid-movie. Ended on disappear.
     @State private var macSleepActivity: NSObjectProtocol?
+    @State private var macFullScreen = NSApp.keyWindow?.styleMask.contains(.fullScreen) ?? false
     #endif
     @State private var panel: Panel?
     @State private var panelRows: [Row] = []   // cached so a 4×/s clock tick doesn't re-rank a thousand sources
@@ -191,19 +195,29 @@ struct PlayerScreen: View {
             // a SwiftUI contentShape layer catches every tap. The controls sit above it, so their
             // buttons still work and a tap on empty space falls through here to toggle.
             Color.clear.contentShape(Rectangle()).onTapGesture { toggleControls() }.ignoresSafeArea()
+                #if os(macOS)
+                // Double-click toggles full screen, as in other Mac video players. Simultaneous so a
+                // single click still shows/hides the controls without waiting out the double-click
+                // interval (a double click toggles them twice, leaving them as they were).
+                .simultaneousGesture(TapGesture(count: 2).onEnded { NSApp.keyWindow?.toggleFullScreen(nil) })
+                #endif
                 .accessibilityLabel("Show player controls")
                 .accessibilityAction { toggleControls() }
 
             if (buffering || reconnecting) && !loadFailed { bufferingOverlay }
 
-            // Skip pill shows only while watching (controls hidden), mirroring tvOS.
-            if let seg = currentSkip, !controlsVisible, panel == nil, !loadFailed { skipPill(seg) }
+            // Skip pill shows only while watching (controls hidden), mirroring tvOS. Over the end
+            // credits the Up Next card takes its place: skipping the credits means the next episode.
+            if let seg = currentSkip, !controlsVisible, panel == nil, !loadFailed,
+               !(showUpNext && seg.kind == .credits) { skipPill(seg) }
 
             // Render controls UNCONDITIONALLY (just faded/non-interactive when hidden) so VoiceOver can
             // still reach them when auto-hidden — otherwise a hidden bar drops out of the a11y tree (#31).
             if !loadFailed {
                 controls.opacity(controlsVisible ? 1 : 0).allowsHitTesting(controlsVisible)
             }
+
+            if showUpNext { upNextCard }
 
             if let panel { selectionSheet(panel) }
 
@@ -228,7 +242,7 @@ struct PlayerScreen: View {
                     }
                     Spacer()
                 }
-                .padding(.horizontal).padding(.top, 12)
+                .padding(.horizontal).padding(.top, 12 + titlebarInset)
                 .transition(.opacity)
                 .zIndex(100)
             }
@@ -247,6 +261,7 @@ struct PlayerScreen: View {
         .persistentSystemOverlays(.hidden)
         #endif
         .tint(Theme.Palette.accent)
+        .animation(.easeInOut(duration: 0.25), value: showUpNext)
         .onAppear {
             curURL = url; curHeaders = headers; curIsTorrent = recordIsTorrent
             scheduleHide(); startLoadTimeout()
@@ -292,6 +307,10 @@ struct PlayerScreen: View {
             Text(externalChooserMessage)
         }
         .sheet(isPresented: $showShare) { ShareSheet(items: [curURL ?? url]) }
+        #if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in macFullScreen = true }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in macFullScreen = false }
+        #endif
     }
 
     // MARK: - Property handling
@@ -840,7 +859,17 @@ struct PlayerScreen: View {
                 showExternalChooser = true
             }
         }
-        .padding(.horizontal).padding(.top, 8)
+        .padding(.horizontal).padding(.top, 8 + titlebarInset)
+    }
+
+    /// The Mac player fills the window under its transparent titlebar, whose traffic lights would sit
+    /// on the top-left buttons; start the top controls below them. Full screen has no traffic lights.
+    private var titlebarInset: CGFloat {
+        #if os(macOS)
+        return macFullScreen ? 0 : 28
+        #else
+        return 0
+        #endif
     }
 
     private var centerTransport: some View {
@@ -957,6 +986,93 @@ struct PlayerScreen: View {
                 .frame(width: 44, height: 44).contentShape(Circle())   // min 44pt tap target (#30)
         }
         .accessibilityLabel(label)
+    }
+
+    // MARK: - Up Next
+
+    /// Whether the Up Next card is up: a next episode exists and this one is in its end credits (a
+    /// detected credits span in the last part of the file) or, without one, its last 30 seconds.
+    private var showUpNext: Bool {
+        guard hasNext, !isLive, hasStartedPlaying, !loadFailed, !upNextDismissed, panel == nil,
+              duration > 120 else { return false }
+        let inCredits = skipSegments.contains { $0.kind == .credits && $0.start >= duration * 0.7 && currentTime >= $0.start }
+        return inCredits || duration - currentTime <= 30
+    }
+
+    /// Bottom-right card offering the next episode in one click. The episode still advances by
+    /// itself when this one ends, so the card counts down the final minute.
+    private var upNextCard: some View {
+        let remaining = max(0, duration - currentTime)
+        return VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 12) {
+                        if let nextThumbnail {
+                            AsyncImage(url: nextThumbnail) { phase in
+                                switch phase {
+                                case .success(let img): img.resizable().aspectRatio(contentMode: .fill)
+                                default: Color.white.opacity(0.08)
+                                }
+                            }
+                            .frame(width: 112, height: 63)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .accessibilityHidden(true)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("UP NEXT").font(.caption2.weight(.bold)).tracking(1.2)
+                                .foregroundStyle(Theme.Palette.accent)
+                            if let nextLabel {
+                                Text(nextLabel).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                            }
+                            if remaining <= 60 {
+                                Text("Starts in \(Int(remaining.rounded(.up)))s")
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.7))
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Button { withAnimation(.easeInOut(duration: 0.2)) { upNextDismissed = true } } label: {
+                            Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.8)).padding(8)
+                                .background(.white.opacity(0.12), in: Circle())
+                                .frame(width: 44, height: 44).contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, -10).padding(.trailing, -10)
+                        .accessibilityLabel("Hide Up Next")
+                    }
+                    Button { playNextNow() } label: {
+                        Label("Play next episode", systemImage: "play.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .foregroundStyle(Theme.Palette.onAccent)
+                            .background(Capsule().fill(Theme.Palette.accent))
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.defaultAction)   // Return plays it on a Mac / iPad keyboard
+                }
+                .padding(14)
+                .frame(width: 320)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.78)))
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.1)))
+                // Sit above the scrubber + control row while the controls are up.
+                .padding(.trailing, 24).padding(.bottom, controlsVisible ? 130 : 36)
+            }
+        }
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
+    }
+
+    /// Leave this episode for the next one: flush progress and count it as watched (choosing Up Next
+    /// over the credits finishes the episode), then hand over to the presenter.
+    private func playNextNow() {
+        if !isLive, duration > 0 { onProgress(currentTime, duration) }
+        if !markedWatched, !isLive, let m = recordMeta { markedWatched = true; core.markPlaybackWatched(m) }
+        onNext()
     }
 
     // MARK: - Skip intro / outro
