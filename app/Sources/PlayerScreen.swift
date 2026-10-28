@@ -255,6 +255,16 @@ struct PlayerScreen: View {
                 .keyboardShortcut(.cancelAction)
                 .hidden()
             #endif
+
+            // ← / → seek 10 s on a Mac or iPad keyboard, like the on-screen skip buttons. Off for live
+            // (no timeline) and while a panel is open, so the keys still move through its list.
+            if !isLive, hasStartedPlaying, panel == nil {
+                Group {
+                    Button { seek(by: -10) } label: { EmptyView() }.keyboardShortcut(.leftArrow, modifiers: [])
+                    Button { seek(by: 10) } label: { EmptyView() }.keyboardShortcut(.rightArrow, modifiers: [])
+                }
+                .hidden()
+            }
         }
         #if os(iOS)
         .statusBarHidden(true)
@@ -891,17 +901,21 @@ struct PlayerScreen: View {
     }
 
     private func seekButton(_ icon: String, by delta: Double) -> some View {
-        Button {
-            let target = min(max(currentTime + delta, 0), max(duration - 1, 0))
-            coordinator.player?.seek(to: target)
-            currentTime = target
-            if duration > 0 { onSeek(target, duration); lastReported = target }
-            scheduleHide()
-        } label: {
+        Button { seek(by: delta) } label: {
             Image(systemName: icon).font(.system(size: 30, weight: .semibold))
                 .foregroundStyle(.white).shadow(radius: 4).frame(width: 60, height: 60)
         }
         .accessibilityLabel(delta < 0 ? "Skip back 10 seconds" : "Skip forward 10 seconds")
+    }
+
+    /// Jump `delta` seconds, clamped to the file, and record the new position. Shows the controls so
+    /// the scrubber confirms where it landed (the ±10 s buttons and the arrow keys share this).
+    private func seek(by delta: Double) {
+        let target = min(max(currentTime + delta, 0), max(duration - 1, 0))
+        coordinator.player?.seek(to: target)
+        currentTime = target
+        if duration > 0 { onSeek(target, duration); lastReported = target }
+        withAnimation(.easeInOut(duration: 0.2)) { scheduleHide() }
     }
 
     private var bottomBar: some View {
